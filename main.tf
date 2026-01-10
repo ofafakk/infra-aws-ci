@@ -76,7 +76,7 @@ resource "aws_instance" "meu_servidor" {
   vpc_security_group_ids = [aws_security_group.firewall.id]
 
   tags = {
-    Name = "Servidor-CI-CD-Funcionando"
+    Name = "Servidor-Automático-GitHub-Actions"
   }
 }
 

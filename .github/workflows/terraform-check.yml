@@ -1,6 +1,5 @@
-name: 'Terraform CI'
+name: 'Terraform CI/CD'
 
-# Quando esse robô deve acordar?
 on:
   push:
     branches: [ "main" ]
@@ -8,15 +7,16 @@ on:
 
 jobs:
   terraform:
-    name: 'Terraform Plan'
-    runs-on: ubuntu-latest # O GitHub empresta um PC Ubuntu pra gente
+    name: 'Terraform Apply'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
-    # 1. Baixa o seu código para dentro do PC do GitHub
     - name: Checkout
       uses: actions/checkout@v3
 
-    # 2. Configura as credenciais da AWS (usando o cofre)
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v1
       with:
@@ -24,18 +24,21 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: us-east-1
 
-    # 3. Instala o Terraform
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
 
-    # 4. Inicializa (baixa plugins)
     - name: Terraform Init
       run: terraform init
 
-    # 5. Valida se o código está bonito/certo
     - name: Terraform Validate
       run: terraform validate
 
-    # 6. Mostra o plano (O que seria criado?)
     - name: Terraform Plan
       run: terraform plan
+
+    # --- A NOVIDADE ESTÁ AQUI EMBAIXO ---
+    
+    - name: Terraform Apply
+      # Segurança: Só roda o apply se for um push na 'main' (ignora Pull Requests)
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: terraform apply -auto-approve
