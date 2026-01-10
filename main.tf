@@ -67,23 +67,32 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# 4. O Servidor
+# 4. O Servidor (AGORA ESCALÁVEL)
 resource "aws_instance" "meu_servidor" {
+  # --- A MÁGICA DO LOOP ---
+  count = var.quantidade_de_servidores 
+  # O Terraform vai ler o número 3 e rodar esse bloco 3 vezes
+  # ------------------------
+
   ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t3.micro" # Ajustado para t3 (Free Tier atual)
+  instance_type = var.tamanho_da_instancia # Usando a variável
 
   key_name               = aws_key_pair.minha_chave.key_name
   vpc_security_group_ids = [aws_security_group.firewall.id]
-
-user_data = file("user_data.sh")
+  
+  user_data = file("user_data.sh")
+  user_data_replace_on_change = true 
 
   tags = {
-    Name = "Servidor-Docker-Automatico"
+    # count.index é o número atual do loop (0, 1, 2...)
+    # Os nomes ficarão: Servidor-0, Servidor-1, Servidor-2
+    Name = "${var.nome_do_projeto}-${count.index}"
   }
 }
 
-# 5. Output do IP
-output "ip_publico" {
-  value       = aws_instance.meu_servidor.public_ip
-  description = "O IP Publico do servidor"
-}
+# 5. Output dos IPs (PRECISA MUDAR)
+# Como agora são vários servidores, o output muda de um valor único para uma lista [*]
+output "ips_publicos" {
+  value       = aws_instance.meu_servidor[*].public_ip
+  description = "Lista dos IPs Publicos dos servidores"
+  }
