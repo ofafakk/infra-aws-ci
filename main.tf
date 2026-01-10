@@ -5,24 +5,33 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # --- CORREÇÃO: O backend agora está DENTRO do bloco terraform ---
+  backend "s3" {
+    bucket = "terraform-state-ofafakk-2026" # <--- TROQUE PELO NOME DO SEU BUCKET
+    key    = "terraform.tfstate"
+    region = "us-east-1"
+  }
+  # -------------------------------------------------------------
 }
 
 provider "aws" {
   region = "us-east-1"
 }
 
-# 1. Enviar sua Chave Pública para a AWS
+# 1. Enviar sua Chave Pública
 resource "aws_key_pair" "minha_chave" {
   key_name   = "chave-devops-aws"
   public_key = file("chave-devops.pub")
 }
 
-# 2. Criar o Porteiro (Security Group/Firewall)
+# 2. Firewall (Security Group)
 resource "aws_security_group" "firewall" {
   name        = "libera_ssh_http"
   description = "Libera porta 22 e 80"
 
-  # Entrada: SSH (22) liberado para todo mundo (0.0.0.0/0)
+  # Porta 22 (SSH) - Aberta para todos (Para facilitar o teste)
+  # Em produção, troque "0.0.0.0/0" pelo seu IP "/32"
   ingress {
     from_port   = 22
     to_port     = 22
@@ -30,7 +39,7 @@ resource "aws_security_group" "firewall" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Entrada: HTTP (80) liberado para todo mundo
+  # Porta 80 (HTTP) - Aberta para o mundo (Site)
   ingress {
     from_port   = 80
     to_port     = 80
@@ -38,7 +47,7 @@ resource "aws_security_group" "firewall" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Saída: Liberada para qualquer lugar (o servidor precisa baixar atualizações)
+  # Saída liberada
   egress {
     from_port   = 0
     to_port     = 0
@@ -47,7 +56,7 @@ resource "aws_security_group" "firewall" {
   }
 }
 
-# 3. Buscar o Linux mais recente
+# 3. Buscar Linux recente
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
@@ -58,22 +67,21 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# 4. Criar o Servidor
+# 4. O Servidor
 resource "aws_instance" "meu_servidor" {
   ami           = data.aws_ami.amazon_linux.id
-  instance_type = "t3.micro"
-  
-  # AQUI ESTÁ O SEGREDO: Conectando a chave e o firewall
+  instance_type = "t3.micro" # Ajustado para t3 (Free Tier atual)
+
   key_name               = aws_key_pair.minha_chave.key_name
   vpc_security_group_ids = [aws_security_group.firewall.id]
 
   tags = {
-    Name = "Servidor-Com-Acesso"
+    Name = "Servidor-CI-CD-Funcionando"
   }
 }
 
-# 5. Output: Mostrar o IP no final
+# 5. Output do IP
 output "ip_publico" {
-  value = aws_instance.meu_servidor.public_ip
-  description = "O IP Publico do servidor para conectar"
+  value       = aws_instance.meu_servidor.public_ip
+  description = "O IP Publico do servidor"
 }
