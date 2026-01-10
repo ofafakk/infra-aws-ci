@@ -75,8 +75,10 @@ resource "aws_instance" "meu_servidor" {
   key_name               = aws_key_pair.minha_chave.key_name
   vpc_security_group_ids = [aws_security_group.firewall.id]
 
+user_data = file("user_data.sh")
+
   tags = {
-    Name = "Servidor-Automático-GitHub-Actions"
+    Name = "Servidor-Docker-Automatico"
   }
 }
 
