@@ -6,8 +6,8 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "terraform-state-ofafakk-2026" # <--- CONFIRME SEU BUCKET
-    key    = "terraform-rds.tfstate"       # Mudei o nome do arquivo para organizar
+    bucket = "terraform-state-ofafakk-2026" # <--- SEU BUCKET
+    key    = "terraform-monitoramento.tfstate"
     region = "us-east-1"
   }
 }
@@ -16,92 +16,61 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# --- 1. Rede Básica (VPC) ---
-resource "aws_vpc" "vpc_dados" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  tags = { Name = "VPC-Database-Lab" }
+# ==========================================
+# 1. O MENSAGEIRO (SNS - Simple Notification Service)
+# ==========================================
+resource "aws_sns_topic" "alerta_cpu" {
+  name = "alerta-cpu-alta"
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.vpc_dados.id
+resource "aws_sns_topic_subscription" "email_usuario" {
+  topic_arn = aws_sns_topic.alerta_cpu.arn
+  protocol  = "email"
+  endpoint  = "fabriciobotelho35@gmail.com" # <--- TROQUE PELO SEU EMAIL REAL
 }
 
-# Criamos 2 subnets porque o RDS exige Alta Disponibilidade (mínimo 2 zonas)
-resource "aws_subnet" "sub_a" {
-  vpc_id            = aws_vpc.vpc_dados.id
-  cidr_block        = "10.0.1.0/24"
-  availability_zone = "us-east-1a"
-  tags = { Name = "Subnet-A" }
+# ==========================================
+# 2. O VIGIA (CloudWatch Alarm)
+# ==========================================
+resource "aws_cloudwatch_metric_alarm" "cpu_alta" {
+  alarm_name          = "cpu-explodindo"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60  # Verifica a cada 60 segundos
+  statistic           = "Average"
+  threshold           = 50  # Dispara se passar de 50% de uso
+  alarm_description   = "Esse alarme dispara quando a CPU passa de 50%"
+  
+  # O que fazer quando disparar? Chamar o tópico SNS (que manda o email)
+  alarm_actions       = [aws_sns_topic.alerta_cpu.arn]
+  
+  # Precisamos dizer QUAL instância vigiar. Vamos apontar para a que criaremos abaixo.
+  dimensions = {
+    InstanceId = aws_instance.servidor_teste.id
+  }
 }
 
-resource "aws_subnet" "sub_b" {
-  vpc_id            = aws_vpc.vpc_dados.id
-  cidr_block        = "10.0.2.0/24"
-  availability_zone = "us-east-1b"
-  tags = { Name = "Subnet-B" }
-}
-
-# --- 2. Preparação para o Banco (DB Subnet Group) ---
-# Isso agrupa as subnets onde o banco pode "morar"
-resource "aws_db_subnet_group" "grupo_banco" {
-  name       = "meu-grupo-de-banco"
-  subnet_ids = [aws_subnet.sub_a.id, aws_subnet.sub_b.id]
+# ==========================================
+# 3. A VÍTIMA (Servidor EC2)
+# ==========================================
+resource "aws_instance" "servidor_teste" {
+  ami           = "ami-04b4f1a9cf54c11d0" # Ubuntu 24.04 (us-east-1)
+  instance_type = "t2.micro"
 
   tags = {
-    Name = "Grupo de Subnets do MySQL"
+    Name = "Servidor-Monitorado"
   }
+
+  # Script para instalar o 'stress' (ferramenta para gerar caos)
+  user_data = <<-EOF
+              #!/bin/bash
+              apt-get update
+              apt-get install -y stress
+              EOF
 }
 
-# --- 3. Segurança (Quem pode acessar?) ---
-resource "aws_security_group" "sg_banco" {
-  name        = "sg_mysql"
-  description = "Permite acesso ao MySQL"
-  vpc_id      = aws_vpc.vpc_dados.id
-
-  # CUIDADO: Em produção, nunca coloque 0.0.0.0/0 na porta do banco!
-  # Estamos fazendo isso apenas para teste de laboratório hoje.
-  ingress {
-    from_port   = 3306
-    to_port     = 3306
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# --- 4. O Banco de Dados (RDS) ---
-resource "aws_db_instance" "meu_mysql" {
-  allocated_storage    = 10             # 10 GB de disco (Free Tier)
-  db_name              = "bancofinanceiro" # Nome do banco interno
-  engine               = "mysql"
-  engine_version       = "8.0"
-  instance_class       = "db.t3.micro"  # Tipo da máquina (Free Tier elegível)
-  
-  # Credenciais (Em prod, usaríamos Variáveis ou Secrets Manager)
-  username             = "admin"
-  password             = "SenhaSuperSecreta123" 
-  
-  parameter_group_name = "default.mysql8.0"
-  skip_final_snapshot  = true           # IMPORTANTE: Para destruir rápido e não cobrar snapshot
-  publicly_accessible  = true           # Para podermos testar conexão de fora (Lab only)
-  
-  vpc_security_group_ids = [aws_security_group.sg_banco.id]
-  db_subnet_group_name   = aws_db_subnet_group.grupo_banco.name
-  
-  tags = {
-    Name = "Meu-Primeiro-RDS"
-  }
-}
-
-# --- 5. Output ---
-output "endereco_do_banco" {
-  value = aws_db_instance.meu_mysql.endpoint
-  description = "Use este endereço para conectar no MySQL Workbench ou DBeaver"
+output "instancia_id" {
+  value = aws_instance.servidor_teste.id
 }
