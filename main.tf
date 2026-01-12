@@ -6,7 +6,7 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "terraform-state-ofafakk-2026" # <--- SEU BUCKET AQUI
+    bucket = "terraform-state-ofafakk-2026" # <--- SEU BUCKET (confirme se está certo)
     key    = "terraform.tfstate"
     region = "us-east-1"
   }
@@ -16,21 +16,59 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# --- 1. Networking e Security ---
-data "aws_vpc" "default" {
-  default = true
+# ==========================================
+# 1. NETWORKING (A Base)
+# ==========================================
+resource "aws_vpc" "minha_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags = { Name = "VPC-Production" }
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+resource "aws_internet_gateway" "meu_gateway" {
+  vpc_id = aws_vpc.minha_vpc.id
+}
+
+resource "aws_subnet" "publica_a" {
+  vpc_id                  = aws_vpc.minha_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+}
+
+resource "aws_subnet" "publica_b" {
+  vpc_id                  = aws_vpc.minha_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+}
+
+resource "aws_route_table" "rotas_publicas" {
+  vpc_id = aws_vpc.minha_vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.meu_gateway.id
   }
 }
 
-resource "aws_security_group" "alb_sg" {
-  name        = "alb_security_group_asg" # Mudei o nome para evitar conflito
-  description = "Libera HTTP para o mundo"
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.publica_a.id
+  route_table_id = aws_route_table.rotas_publicas.id
+}
+
+resource "aws_route_table_association" "b" {
+  subnet_id      = aws_subnet.publica_b.id
+  route_table_id = aws_route_table.rotas_publicas.id
+}
+
+# ==========================================
+# 2. SEGURANÇA (Security Groups)
+# ==========================================
+resource "aws_security_group" "autoscaling_sg" {
+  name        = "autoscaling_sg_custom"
+  description = "Security Group para o ASG na VPC Customizada"
+  vpc_id      = aws_vpc.minha_vpc.id # <--- IMPORTANTE: Define onde ele mora
 
   ingress {
     from_port   = 80
@@ -47,13 +85,9 @@ resource "aws_security_group" "alb_sg" {
   }
 }
 
-resource "aws_key_pair" "minha_chave" {
-  key_name   = "chave-devops-asg" # Mudei o nome
-  public_key = file("chave-devops.pub")
-}
-
-# --- 2. O Modelo da Máquina (Launch Template) ---
-# Aqui definimos COMO a máquina deve ser, mas não criamos nenhuma ainda.
+# ==========================================
+# 3. COMPUTE (Launch Template + ASG)
+# ==========================================
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
@@ -63,83 +97,72 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-resource "aws_launch_template" "modelo_servidor" {
-  name_prefix   = "modelo-app-"
+resource "aws_launch_template" "modelo_v2" {
+  name_prefix   = "modelo-vpc-custom-"
   image_id      = data.aws_ami.amazon_linux.id
   instance_type = var.tamanho_da_instancia
-  key_name      = aws_key_pair.minha_chave.key_name
+  
+  # Como estamos na VPC nova, o SG tem que ser o da VPC nova
+  vpc_security_group_ids = [aws_security_group.autoscaling_sg.id]
 
-  vpc_security_group_ids = [aws_security_group.alb_sg.id]
-
-  # IMPORTANTE: No Launch Template, o script precisa ser base64
   user_data = filebase64("user_data.sh")
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name = "Servidor-AutoScaling"
-    }
-  }
 }
 
-# --- 3. O Gerenciador de Escala (Auto Scaling Group) ---
-resource "aws_autoscaling_group" "grupo_escalavel" {
-  # Configurações de Quantidade
-  desired_capacity    = 2  # Começa com 2
-  max_size            = 5  # Pode crescer até 5
-  min_size            = 1  # Nunca ter menos de 1
+resource "aws_autoscaling_group" "asg_v2" {
+  desired_capacity    = 2
+  max_size            = 3
+  min_size            = 1
+  
+  # AQUI ESTA A MAGICA: Mandamos criar nas NOSSAS subnets, não nas da Amazon
+  vpc_zone_identifier = [aws_subnet.publica_a.id, aws_subnet.publica_b.id]
+  
+  target_group_arns   = [aws_lb_target_group.tg_v2.arn]
 
-  # Onde as máquinas vão morar (Subnets)
-  vpc_zone_identifier = data.aws_subnets.default.ids
-
-  # Conexão com o Load Balancer (Ele se registra sozinho aqui)
-  target_group_arns = [aws_lb_target_group.grupo_alvo.arn]
-
-  # Qual modelo usar?
   launch_template {
-    id      = aws_launch_template.modelo_servidor.id
+    id      = aws_launch_template.modelo_v2.id
     version = "$Latest"
   }
-  
-  # Se mudar o modelo, ele troca as máquinas antigas pelas novas
-  instance_refresh {
-    strategy = "Rolling"
-  }
 }
 
-# --- 4. Load Balancer (Praticamente igual) ---
-resource "aws_lb" "meu_load_balancer" {
-  name               = "meu-alb-asg"
+# ==========================================
+# 4. LOAD BALANCER (ALB)
+# ==========================================
+resource "aws_lb" "alb_v2" {
+  name               = "alb-vpc-custom"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = data.aws_subnets.default.ids
+  security_groups    = [aws_security_group.autoscaling_sg.id]
+  
+  # O LB também precisa morar nas subnets novas
+  subnets            = [aws_subnet.publica_a.id, aws_subnet.publica_b.id]
 }
 
-resource "aws_lb_target_group" "grupo_alvo" {
-  name     = "target-group-asg"
+resource "aws_lb_target_group" "tg_v2" {
+  name     = "tg-vpc-custom"
   port     = 80
   protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
+  vpc_id   = aws_vpc.minha_vpc.id # <--- O TG precisa saber a qual VPC pertence
   
   health_check {
-    path = "/"
+    path    = "/"
     matcher = "200"
   }
 }
 
-resource "aws_lb_listener" "front_end" {
-  load_balancer_arn = aws_lb.meu_load_balancer.arn
+resource "aws_lb_listener" "listener_v2" {
+  load_balancer_arn = aws_lb.alb_v2.arn
   port              = "80"
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.grupo_alvo.arn
+    target_group_arn = aws_lb_target_group.tg_v2.arn
   }
 }
 
-# --- 5. Output ---
+# ==========================================
+# 5. OUTPUTS
+# ==========================================
 output "dns_load_balancer" {
-  value = aws_lb.meu_load_balancer.dns_name
+  value = aws_lb.alb_v2.dns_name
 }
