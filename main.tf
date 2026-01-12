@@ -6,8 +6,8 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "terraform-state-ofafakk-2026" # <--- SEU BUCKET (confirme se está certo)
-    key    = "terraform.tfstate"
+    bucket = "terraform-state-ofafakk-2026" # <--- CONFIRME SEU BUCKET
+    key    = "terraform-rds.tfstate"       # Mudei o nome do arquivo para organizar
     region = "us-east-1"
   }
 }
@@ -16,67 +16,58 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# ==========================================
-# 1. NETWORKING (A Base)
-# ==========================================
-resource "aws_vpc" "minha_vpc" {
+# --- 1. Rede Básica (VPC) ---
+resource "aws_vpc" "vpc_dados" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
-  enable_dns_support   = true
-  tags = { Name = "VPC-Production" }
+  tags = { Name = "VPC-Database-Lab" }
 }
 
-resource "aws_internet_gateway" "meu_gateway" {
-  vpc_id = aws_vpc.minha_vpc.id
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.vpc_dados.id
 }
 
-resource "aws_subnet" "publica_a" {
-  vpc_id                  = aws_vpc.minha_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = true
+# Criamos 2 subnets porque o RDS exige Alta Disponibilidade (mínimo 2 zonas)
+resource "aws_subnet" "sub_a" {
+  vpc_id            = aws_vpc.vpc_dados.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+  tags = { Name = "Subnet-A" }
 }
 
-resource "aws_subnet" "publica_b" {
-  vpc_id                  = aws_vpc.minha_vpc.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "us-east-1b"
-  map_public_ip_on_launch = true
+resource "aws_subnet" "sub_b" {
+  vpc_id            = aws_vpc.vpc_dados.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1b"
+  tags = { Name = "Subnet-B" }
 }
 
-resource "aws_route_table" "rotas_publicas" {
-  vpc_id = aws_vpc.minha_vpc.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.meu_gateway.id
+# --- 2. Preparação para o Banco (DB Subnet Group) ---
+# Isso agrupa as subnets onde o banco pode "morar"
+resource "aws_db_subnet_group" "grupo_banco" {
+  name       = "meu-grupo-de-banco"
+  subnet_ids = [aws_subnet.sub_a.id, aws_subnet.sub_b.id]
+
+  tags = {
+    Name = "Grupo de Subnets do MySQL"
   }
 }
 
-resource "aws_route_table_association" "a" {
-  subnet_id      = aws_subnet.publica_a.id
-  route_table_id = aws_route_table.rotas_publicas.id
-}
+# --- 3. Segurança (Quem pode acessar?) ---
+resource "aws_security_group" "sg_banco" {
+  name        = "sg_mysql"
+  description = "Permite acesso ao MySQL"
+  vpc_id      = aws_vpc.vpc_dados.id
 
-resource "aws_route_table_association" "b" {
-  subnet_id      = aws_subnet.publica_b.id
-  route_table_id = aws_route_table.rotas_publicas.id
-}
-
-# ==========================================
-# 2. SEGURANÇA (Security Groups)
-# ==========================================
-resource "aws_security_group" "autoscaling_sg" {
-  name        = "autoscaling_sg_custom"
-  description = "Security Group para o ASG na VPC Customizada"
-  vpc_id      = aws_vpc.minha_vpc.id # <--- IMPORTANTE: Define onde ele mora
-
+  # CUIDADO: Em produção, nunca coloque 0.0.0.0/0 na porta do banco!
+  # Estamos fazendo isso apenas para teste de laboratório hoje.
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 3306
+    to_port     = 3306
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
+  
   egress {
     from_port   = 0
     to_port     = 0
@@ -85,84 +76,32 @@ resource "aws_security_group" "autoscaling_sg" {
   }
 }
 
-# ==========================================
-# 3. COMPUTE (Launch Template + ASG)
-# ==========================================
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"]
+# --- 4. O Banco de Dados (RDS) ---
+resource "aws_db_instance" "meu_mysql" {
+  allocated_storage    = 10             # 10 GB de disco (Free Tier)
+  db_name              = "bancofinanceiro" # Nome do banco interno
+  engine               = "mysql"
+  engine_version       = "8.0"
+  instance_class       = "db.t3.micro"  # Tipo da máquina (Free Tier elegível)
+  
+  # Credenciais (Em prod, usaríamos Variáveis ou Secrets Manager)
+  username             = "admin"
+  password             = "SenhaSuperSecreta123" 
+  
+  parameter_group_name = "default.mysql8.0"
+  skip_final_snapshot  = true           # IMPORTANTE: Para destruir rápido e não cobrar snapshot
+  publicly_accessible  = true           # Para podermos testar conexão de fora (Lab only)
+  
+  vpc_security_group_ids = [aws_security_group.sg_banco.id]
+  db_subnet_group_name   = aws_db_subnet_group.grupo_banco.name
+  
+  tags = {
+    Name = "Meu-Primeiro-RDS"
   }
 }
 
-resource "aws_launch_template" "modelo_v2" {
-  name_prefix   = "modelo-vpc-custom-"
-  image_id      = data.aws_ami.amazon_linux.id
-  instance_type = var.tamanho_da_instancia
-  
-  # Como estamos na VPC nova, o SG tem que ser o da VPC nova
-  vpc_security_group_ids = [aws_security_group.autoscaling_sg.id]
-
-  user_data = filebase64("user_data.sh")
-}
-
-resource "aws_autoscaling_group" "asg_v2" {
-  desired_capacity    = 2
-  max_size            = 3
-  min_size            = 1
-  
-  # AQUI ESTA A MAGICA: Mandamos criar nas NOSSAS subnets, não nas da Amazon
-  vpc_zone_identifier = [aws_subnet.publica_a.id, aws_subnet.publica_b.id]
-  
-  target_group_arns   = [aws_lb_target_group.tg_v2.arn]
-
-  launch_template {
-    id      = aws_launch_template.modelo_v2.id
-    version = "$Latest"
-  }
-}
-
-# ==========================================
-# 4. LOAD BALANCER (ALB)
-# ==========================================
-resource "aws_lb" "alb_v2" {
-  name               = "alb-vpc-custom"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.autoscaling_sg.id]
-  
-  # O LB também precisa morar nas subnets novas
-  subnets            = [aws_subnet.publica_a.id, aws_subnet.publica_b.id]
-}
-
-resource "aws_lb_target_group" "tg_v2" {
-  name     = "tg-vpc-custom"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.minha_vpc.id # <--- O TG precisa saber a qual VPC pertence
-  
-  health_check {
-    path    = "/"
-    matcher = "200"
-  }
-}
-
-resource "aws_lb_listener" "listener_v2" {
-  load_balancer_arn = aws_lb.alb_v2.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.tg_v2.arn
-  }
-}
-
-# ==========================================
-# 5. OUTPUTS
-# ==========================================
-output "dns_load_balancer" {
-  value = aws_lb.alb_v2.dns_name
+# --- 5. Output ---
+output "endereco_do_banco" {
+  value = aws_db_instance.meu_mysql.endpoint
+  description = "Use este endereço para conectar no MySQL Workbench ou DBeaver"
 }
